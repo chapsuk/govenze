@@ -3,15 +3,15 @@
 Check vendor size for repo. Checking with:
 
 * [godep](https://github.com/tools/godep)
-* [glide](https://github.com/Masterminds/glide)
+* [glide](https://github.com/Masterminds/glide), using with `--skip-test`
 * [dep](https://github.com/golang/dep)
 
-## Result (2017-02-19)
+## Result examples
+
+[Frissgo](https://github.com/chapsuk/frissgo)
 
 ```bash
-≻ /govenze -target github.com/chapsuk/frissgo
-2017/02/19 19:41:16 Detected GOPATH: /Users/mak/go
-2017/02/19 19:41:16 Create tmp dir: /Users/mak/.govenze
+≻ govenze -target github.com/chapsuk/frissgo
 
 Vendor manager: godep
 ======
@@ -29,9 +29,33 @@ Vendor manager: dep
 ======
 Size: 6.65Mb
 Time: 30.68s
-
-2017/02/19 19:41:47 Tmp dir /Users/mak/.govenze deleted
 ```
+
+[Viper](https://github.com/spf13/viper)
+
+```bash
+≻ govenze -target github.com/spf13/viper
+
+Vendor manager: godep
+======
+Size: 6.37Mb
+Time: 5.81s
+
+
+Vendor manager: glide
+======
+Size: 27.11Mb
+Time: 39.99s
+
+
+Vendor manager: dep
+======
+Size: 26.63Mb
+Time: 41.48s
+
+```
+
+![](https://media.giphy.com/media/Yo9Xldk1F5196/giphy.gif)
 
 ## Notices
 

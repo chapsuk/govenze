@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -40,12 +42,22 @@ func main() {
 	handleError(err)
 
 	if *clearm {
-		defer func() {
+		clearFunc := func() {
 			err := clear(tmpPath)
 			if err != nil {
 				log.Printf("Clear tmp dir error: %s", err)
+			} else {
+				log.Printf("Tmp dir %s deleted", tmpPath)
 			}
+		}
+		sigCh := make(chan os.Signal)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		signal.Notify(sigCh, os.Interrupt)
+		go func() {
+			<-sigCh
+			clearFunc()
 		}()
+		defer clearFunc()
 	}
 
 	tmpProjPath := fmt.Sprintf("%s/proj/%s", tmpPath, *target)

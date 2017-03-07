@@ -1,0 +1,10 @@
+- repo: github.com/chapsuk/frissgo
+  build: go build
+- repo: github.com/tools/godep
+  build: go build
+- repo: github.com/Masterminds/glide
+  build: make build
+- repo: github.com/kardianos/govendor
+  build: go build
+- repo: github.com/golang/dep
+  # build: go build ./cmd/dep/ # dep use 2.x branch of Masterminds/vcs , hard for build :)

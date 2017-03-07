@@ -16,6 +16,7 @@ type gb struct{}
 type glide struct{}
 type godep struct{}
 type dep struct{}
+type govendor struct{}
 
 func (d *dep) String() string { return "dep" }
 func (d *dep) DoVendor(dir, gopath string) (out bytes.Buffer, errs bytes.Buffer, err error) {
@@ -79,5 +80,26 @@ func (g *godep) DoVendor(dir, gopath string) (out bytes.Buffer, errs bytes.Buffe
 	cmd.Env = append(cmd.Env, fmt.Sprintf("GOPATH=%s", gopath))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s", os.Getenv("PATH")))
 	err = cmd.Run()
+	return
+}
+
+func (g *govendor) String() string { return "govendor" }
+func (g *govendor) DoVendor(dir, gopath string) (out bytes.Buffer, errs bytes.Buffer, err error) {
+	cmd := exec.Command("govendor", "init")
+	cmd.Dir = dir
+	cmd.Stdout = &out
+	cmd.Stderr = &errs
+	cmd.Env = append(cmd.Env, fmt.Sprintf("GOPATH=%s", gopath))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s", os.Getenv("PATH")))
+	err = cmd.Run()
+	if err == nil {
+		cmdInstall := exec.Command("govendor", "add", "+external")
+		cmdInstall.Dir = dir
+		cmdInstall.Stdout = &out
+		cmdInstall.Stderr = &errs
+		cmdInstall.Env = append(cmd.Env, fmt.Sprintf("GOPATH=%s", gopath))
+		cmdInstall.Env = append(cmd.Env, fmt.Sprintf("PATH=%s", os.Getenv("PATH")))
+		err = cmdInstall.Run()
+	}
 	return
 }

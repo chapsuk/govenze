@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,121 +21,132 @@ type result struct {
 	manager string
 	size    float64
 	elapsed time.Duration
+	build   bool
 }
 
 var (
-	target  = flag.String("target", "", "target project")
-	clearm  = flag.Bool("clear", true, "clear tmp dirafter complete")
+	config  = flag.String("config", "config.yml", "config file name")
 	tmpPath = fmt.Sprintf("%s/%s", getHomeDir(), ".govenze")
 )
 
 func main() {
 	flag.Parse()
 
-	if *target == "" {
-		handleError(fmt.Errorf("target flag is required"))
+	if *config == "" {
+		handleError(fmt.Errorf("config flag is required"))
 	}
-
-	rgopath, err := detectGopath(*target)
-	handleError(err)
-	log.Printf("Detected GOPATH: %s", rgopath)
-
-	projPath := fmt.Sprintf("%s/src/%s", rgopath, *target)
-
-	log.Printf("Create tmp dir: %s", tmpPath)
-	err = os.Mkdir(tmpPath, os.ModePerm)
+	cfgs, err := LoadConfig(*config)
 	handleError(err)
 
-	if *clearm {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+		<-ch
+		cancel()
+	}()
+
+	exitFuncs := []func(){}
+	go func() {
+		<-ctx.Done()
+		for _, f := range exitFuncs {
+			f()
+		}
+		log.Print("process was stopped")
+		os.Exit(1)
+	}()
+
+	managers := []manager{&dep{}, &glide{}, &godep{}, &govendor{}}
+	for _, item := range cfgs {
+		rgopath, err := detectGopath(item.Repo)
+		handleError(err)
+		log.Printf("Detected GOPATH: %s", rgopath)
+
+		projPath := fmt.Sprintf("%s/src/%s", rgopath, item.Repo)
+
+		log.Printf("Create tmp dir: %s", tmpPath)
+		err = os.Mkdir(tmpPath, os.ModePerm)
+		handleError(err)
+
+		tmpProjPath := fmt.Sprintf("%s/proj/%s", tmpPath, item.Repo)
+		err = copyDir(projPath, tmpProjPath)
+		handleError(err)
 		clearFunc := func() {
-			err := clear(tmpPath)
-			if err != nil {
-				log.Printf("Clear tmp dir error: %s", err)
-			} else {
-				log.Printf("Tmp dir %s deleted", tmpPath)
-			}
+			log.Print("restore original")
+			copyDir(tmpProjPath, projPath)
+			log.Print("remove tmp")
+			os.RemoveAll(tmpPath)
 		}
-		sigCh := make(chan os.Signal)
-		signal.Notify(sigCh, syscall.SIGTERM)
-		signal.Notify(sigCh, os.Interrupt)
-		go func() {
-			<-sigCh
-			clearFunc()
-		}()
-		defer clearFunc()
-	}
+		exitFuncs = append(exitFuncs, clearFunc)
 
-	tmpProjPath := fmt.Sprintf("%s/proj/%s", tmpPath, *target)
-	err = copyDir(projPath, tmpProjPath)
-	handleError(err)
+		// remove original dir, if packages duplicates in GOPATH
+		// govendor throw fatal error: stack overflow
+		err = os.RemoveAll(projPath)
+		handleError(err)
 
-	managers := []manager{&dep{}, &glide{}, &godep{}}
-	res := make([]*result, len(managers))
-	wg := sync.WaitGroup{}
-	wg.Add(len(managers))
-	for _, m := range managers {
-		go func(m manager) {
-			start := time.Now()
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("Manager %s stopped with error: %s", m.String(), r)
+		res := make([]*result, len(managers))
+		wg := sync.WaitGroup{}
+		wg.Add(len(managers))
+		for _, m := range managers {
+			go func(m manager) {
+				start := time.Now()
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("Manager %s stopped with error: %s", m.String(), r)
+					}
+					wg.Done()
+				}()
+				mgopath := fmt.Sprintf("%s/%s", tmpPath, m.String())
+				mpath := fmt.Sprintf("%s/src/%s/", mgopath, item.Repo)
+
+				err = copyDir(tmpProjPath, mpath)
+				handleError(err)
+
+				preparePath(mpath)
+
+				gopath := fmt.Sprintf("%s:%s", rgopath, mgopath)
+
+				_, errs, err := m.DoVendor(mpath, gopath)
+				if err != nil {
+					log.Printf("%s errors: %s error: %s", m.String(), errs.Bytes(), err)
 				}
-				wg.Done()
-			}()
-			mgopath := fmt.Sprintf("%s/%s", tmpPath, m.String())
-			mpath := fmt.Sprintf("%s/src/%s/", mgopath, *target)
 
-			err = copyDir(tmpProjPath, mpath)
-			handleError(err)
-
-			preparePath(mpath)
-
-			gopath := fmt.Sprintf("%s:%s", rgopath, mgopath)
-
-			_, errs, err := m.DoVendor(mpath, gopath)
-			if err != nil {
-				log.Printf("%s error: %s", m.String(), errs.Bytes())
-			}
-
-			res = append(res, &result{
-				manager: m.String(),
-				size:    dirSizeMB(fmt.Sprintf("%s/vendor/", mpath)),
-				elapsed: time.Since(start),
-			})
-		}(m)
-	}
-	wg.Wait()
-
-	prettyPrint(res)
-}
-
-func prettyPrint(res []*result) {
-	for _, r := range res {
-		if r == nil {
-			continue
+				r := &result{
+					manager: m.String(),
+					size:    dirSizeMB(fmt.Sprintf("%s/vendor/", mpath)),
+					elapsed: time.Since(start),
+				}
+				if item.Build != "" {
+					_, errs, err := runBuild(item.Build, mpath, gopath)
+					if err != nil {
+						log.Printf("Run build error, manager: %s errors: %s error: %s", m.String(), errs.Bytes(), err)
+					} else {
+						r.build = true
+					}
+				}
+				res = append(res, r)
+			}(m)
 		}
-		fmt.Printf("\nVendor manager: %s\n", r.manager)
-		fmt.Print("======\n")
-		fmt.Printf("Size: %.2fMb\n", r.size)
-		fmt.Printf("Time: %.2fs\n\n", r.elapsed.Seconds())
+		wg.Wait()
+		prettyPrint(item.Repo, res)
+		clearFunc()
+		exitFuncs = []func(){}
 	}
 }
 
 func dirSizeMB(path string) float64 {
 	var dirSize int64
-
 	readSize := func(path string, file os.FileInfo, err error) error {
+		if file == nil {
+			return errors.New("empty result vendor path")
+		}
 		if !file.IsDir() {
 			dirSize += file.Size()
 		}
-
 		return nil
 	}
-
 	filepath.Walk(path, readSize)
-
 	sizeMB := float64(dirSize) / 1024.0 / 1024.0
-
 	return sizeMB
 }
 
@@ -168,4 +184,20 @@ func handleError(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func runBuild(buildCMD, dir, gopath string) (out bytes.Buffer, errs bytes.Buffer, err error) {
+	if buildCMD == "" {
+		err = errors.New("wrong build command")
+		return
+	}
+	args := strings.Split(buildCMD, " ")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	cmd.Stdout = &out
+	cmd.Stderr = &errs
+	cmd.Env = append(cmd.Env, fmt.Sprintf("GOPATH=%s", gopath))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s", os.Getenv("PATH")))
+	err = cmd.Run()
+	return
 }
